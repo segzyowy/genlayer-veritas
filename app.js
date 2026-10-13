@@ -134,25 +134,27 @@ const walletBtn = document.getElementById("connectWalletBtn");
 
 async function connectWallet() {
   if (isWalletConnected) {
-    alert(`Connected Account: ${userAddress}\nNetwork: GenLayer Testnet (Chain ID 42161)`);
+    alert(`Connected Account:\n${userAddress}`);
     return;
   }
 
-  if (window.ethereum) {
+  if (typeof window.ethereum !== "undefined") {
     try {
-      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      walletBtn.innerText = "Connecting...";
+      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       if (accounts && accounts.length > 0) {
         userAddress = accounts[0];
         setConnectedUI(userAddress);
-        return;
+      } else {
+        walletBtn.innerText = "Connect GenLayer Wallet";
       }
     } catch (err) {
-      console.warn("User rejected Web3 connection, falling back to simulated GenLayer account:", err);
+      walletBtn.innerText = "Connect GenLayer Wallet";
+      alert("Wallet connection was rejected or failed: " + (err.message || err));
     }
+  } else {
+    alert("No Web3 wallet found! Please install MetaMask or Rabby in your browser to connect your wallet.");
   }
-
-  userAddress = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
-  setConnectedUI(userAddress);
 }
 
 function setConnectedUI(addr) {
@@ -162,7 +164,22 @@ function setConnectedUI(addr) {
   walletBtn.style.background = "#059669";
   walletBtn.style.color = "#ffffff";
   walletBtn.style.border = "1px solid #10b981";
-  walletBtn.title = "Click to view account info";
+}
+
+if (typeof window.ethereum !== "undefined") {
+  window.ethereum.on("accountsChanged", (accounts) => {
+    if (accounts.length > 0) {
+      userAddress = accounts[0];
+      setConnectedUI(userAddress);
+    } else {
+      isWalletConnected = false;
+      userAddress = null;
+      walletBtn.innerText = "Connect GenLayer Wallet";
+      walletBtn.style.background = "";
+      walletBtn.style.color = "";
+      walletBtn.style.border = "";
+    }
+  });
 }
 
 walletBtn.addEventListener("click", connectWallet);
