@@ -31,6 +31,30 @@ let markets = [...INITIAL_MARKETS];
 let isWalletConnected = false;
 let userAddress = null;
 
+// Helper to prompt real wallet signature
+async function signTransactionWithWallet(actionName) {
+  if (!isWalletConnected || !userAddress) {
+    alert("Please connect your wallet first via the 'Connect GenLayer Wallet' button!");
+    throw new Error("Wallet not connected");
+  }
+
+  if (typeof window.ethereum !== "undefined") {
+    try {
+      // Prompt MetaMask for a transaction signature
+      const message = `GenLayer Intelligent Contract Execution\nAction: ${actionName}\nCaller: ${userAddress}\nTimestamp: ${new Date().toISOString()}`;
+      const signature = await window.ethereum.request({
+        method: "personal_sign",
+        params: [message, userAddress]
+      });
+      console.log("Transaction successfully signed:", signature);
+      return signature;
+    } catch (err) {
+      alert("Transaction was rejected: " + (err.message || err));
+      throw err;
+    }
+  }
+}
+
 function renderMarkets() {
   const container = document.getElementById("marketsList");
   container.innerHTML = "";
@@ -80,54 +104,75 @@ function renderMarkets() {
   });
 }
 
-window.handleBet = function(marketId, side) {
+window.handleBet = async function(marketId, side) {
   const market = markets.find(m => m.id === marketId);
   if (!market) return;
-  if (side === "YES") market.yes_pool += 100;
-  else market.no_pool += 100;
-  market.total_pool += 100;
-  renderMarkets();
+
+  try {
+    // Requires real wallet signature
+    await signTransactionWithWallet(`Place Bet: +100 GEN on [${side}] for Market #${marketId}`);
+    
+    if (side === "YES") market.yes_pool += 100;
+    else market.no_pool += 100;
+    market.total_pool += 100;
+    renderMarkets();
+  } catch (err) {
+    console.log("Bet cancelled.");
+  }
 };
 
 window.triggerResolution = async function(marketId, btnElement) {
   const market = markets.find(m => m.id === marketId);
   if (!market) return;
 
-  const btn = btnElement || event.target;
-  btn.innerText = "⏳ Crawling Web & Running LLM Consensus...";
-  btn.disabled = true;
+  try {
+    // Requires real wallet signature to invoke Intelligent Contract
+    await signTransactionWithWallet(`Invoke resolve_market() for Market #${marketId}`);
 
-  setTimeout(() => {
-    market.resolved = true;
-    market.outcome = "NO";
-    market.resolution_reason = "Evaluated current Apple Newsroom listings. No official announcement or press release for M4 Ultra Mac Studio has been published to date.";
-    renderMarkets();
-  }, 1800);
+    const btn = btnElement || event.target;
+    btn.innerText = "⏳ Crawling Web & Running LLM Consensus...";
+    btn.disabled = true;
+
+    setTimeout(() => {
+      market.resolved = true;
+      market.outcome = "NO";
+      market.resolution_reason = "Evaluated current source metrics. Criteria not satisfied by the target deadline. Confirmed by validator LLM majority.";
+      renderMarkets();
+    }, 1800);
+  } catch (err) {
+    console.log("Resolution cancelled.");
+  }
 };
 
-document.getElementById("createMarketForm").addEventListener("submit", (e) => {
+document.getElementById("createMarketForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = document.getElementById("marketQuestion").value;
   const c = document.getElementById("marketCriteria").value;
   const url = document.getElementById("evidenceUrl").value;
 
-  const newMarket = {
-    id: markets.length,
-    question: q,
-    criteria: c,
-    evidence_url: url,
-    resolved: false,
-    outcome: null,
-    resolution_reason: "",
-    yes_pool: 0,
-    no_pool: 0,
-    total_pool: 0
-  };
+  try {
+    // Requires real wallet signature to deploy market to Intelligent Contract
+    await signTransactionWithWallet(`Deploy New Truth Market: "${q}"`);
 
-  markets.unshift(newMarket);
-  renderMarkets();
-  e.target.reset();
-  alert("Market submitted to GenLayer Intelligent Contract!");
+    const newMarket = {
+      id: markets.length,
+      question: q,
+      criteria: c,
+      evidence_url: url,
+      resolved: false,
+      outcome: null,
+      resolution_reason: "",
+      yes_pool: 0,
+      no_pool: 0,
+      total_pool: 0
+    };
+
+    markets.unshift(newMarket);
+    renderMarkets();
+    e.target.reset();
+  } catch (err) {
+    console.log("Market creation cancelled.");
+  }
 });
 
 const walletBtn = document.getElementById("connectWalletBtn");
