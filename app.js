@@ -42,66 +42,80 @@ const INITIAL_MARKETS = [
 let markets = [...INITIAL_MARKETS];
 let isWalletConnected = false;
 let userAddress = null;
+let activeWalletName = "Wallet";
 
-// Ensure wallet is on GenLayer Bradbury
-async function ensureGenLayerNetwork() {
-  if (!window.ethereum) return;
+// Get active wallet provider (supports Rabby, MetaMask, Coinbase, etc.)
+function getWalletProvider() {
+  if (typeof window.rabby !== "undefined") {
+    activeWalletName = "Rabby";
+    return window.rabby;
+  }
+  if (typeof window.ethereum !== "undefined") {
+    if (window.ethereum.isRabby) activeWalletName = "Rabby";
+    else if (window.ethereum.isMetaMask) activeWalletName = "MetaMask";
+    return window.ethereum;
+  }
+  return null;
+}
+
+// Ensure network is GenLayer Bradbury without blocking connection
+async function trySwitchToGenLayer(provider) {
   try {
-    await window.ethereum.request({
+    await provider.request({
       method: "wallet_switchEthereumChain",
       params: [{ chainId: GENLAYER_BRADBURY.chainId }]
     });
   } catch (switchError) {
-    // Error code 4902 indicates the chain has not been added to MetaMask yet
-    if (switchError.code === 4902 || switchError.data?.originalError?.code === 4902) {
-      await window.ethereum.request({
-        method: "wallet_addEthereumChain",
-        params: [GENLAYER_BRADBURY]
-      });
-    } else {
-      console.warn("Could not switch to GenLayer Bradbury automatically:", switchError);
+    if (switchError.code === 4902 || switchError.data?.originalError?.code === 4902 || switchError.code === -32603) {
+      try {
+        await provider.request({
+          method: "wallet_addEthereumChain",
+          params: [GENLAYER_BRADBURY]
+        });
+      } catch (addError) {
+        console.warn("User dismissed adding GenLayer Bradbury chain:", addError);
+      }
     }
   }
 }
 
-// Prompt transaction signature directly on GenLayer
+// Prompt transaction signature directly on Rabby / MetaMask
 async function sendOnChainTransaction(actionName) {
-  if (!isWalletConnected || !userAddress) {
-    alert("Please connect your wallet first via the 'Connect GenLayer Wallet' button!");
+  const provider = getWalletProvider();
+  if (!isWalletConnected || !userAddress || !provider) {
+    alert("Please connect your Rabby or Web3 wallet first!");
     throw new Error("Wallet not connected");
   }
 
-  await ensureGenLayerNetwork();
+  // Attempt to switch to Bradbury if not already on it
+  await trySwitchToGenLayer(provider);
 
-  if (typeof window.ethereum !== "undefined") {
+  try {
+    const dataPayload = "0x" + Array.from(new TextEncoder().encode(actionName)).map(b => b.toString(16).padStart(2, '0')).join('');
+    const txHash = await provider.request({
+      method: "eth_sendTransaction",
+      params: [
+        {
+          from: userAddress,
+          to: userAddress,
+          value: "0x0",
+          data: dataPayload
+        }
+      ]
+    });
+    console.log("Transaction sent! Hash:", txHash);
+    return txHash;
+  } catch (err) {
+    console.warn("eth_sendTransaction skipped, requesting personal_sign approval in " + activeWalletName + ":", err);
     try {
-      const dataPayload = "0x" + Array.from(new TextEncoder().encode(actionName)).map(b => b.toString(16).padStart(2, '0')).join('');
-      const txHash = await window.ethereum.request({
-        method: "eth_sendTransaction",
-        params: [
-          {
-            from: userAddress,
-            to: userAddress,
-            value: "0x0",
-            data: dataPayload
-          }
-        ]
+      const message = `GenLayer Bradbury Testnet\nAction: ${actionName}\nCaller: ${userAddress}\nTimestamp: ${new Date().toISOString()}`;
+      return await provider.request({
+        method: "personal_sign",
+        params: [message, userAddress]
       });
-      console.log("GenLayer testnet transaction confirmed! Hash:", txHash);
-      return txHash;
-    } catch (err) {
-      // Fallback to personal_sign if testnet gas fee estimate fails
-      console.warn("eth_sendTransaction failed, requesting signature:", err);
-      try {
-        const message = `GenLayer Bradbury Testnet\nContract Action: ${actionName}\nCaller: ${userAddress}\nTimestamp: ${new Date().toISOString()}`;
-        return await window.ethereum.request({
-          method: "personal_sign",
-          params: [message, userAddress]
-        });
-      } catch (signErr) {
-        alert("Transaction was rejected: " + (signErr.message || signErr));
-        throw signErr;
-      }
+    } catch (signErr) {
+      alert("Transaction was rejected: " + (signErr.message || signErr));
+      throw signErr;
     }
   }
 }
@@ -225,42 +239,45 @@ document.getElementById("createMarketForm").addEventListener("submit", async (e)
 const walletBtn = document.getElementById("connectWalletBtn");
 
 async function connectWallet() {
+  const provider = getWalletProvider();
+
   if (isWalletConnected) {
-    alert(`Connected Account:\n${userAddress}\nNetwork: GenLayer Bradbury Testnet (4221)`);
+    alert(`Connected with ${activeWalletName}:\n${userAddress}`);
     return;
   }
 
-  if (typeof window.ethereum !== "undefined") {
+  if (provider) {
     try {
       walletBtn.innerText = "Connecting...";
-      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+      const accounts = await provider.request({ method: "eth_requestAccounts" });
       if (accounts && accounts.length > 0) {
         userAddress = accounts[0];
-        await ensureGenLayerNetwork();
         setConnectedUI(userAddress);
+        trySwitchToGenLayer(provider); // Non-blocking network check
       } else {
         walletBtn.innerText = "Connect GenLayer Wallet";
       }
     } catch (err) {
       walletBtn.innerText = "Connect GenLayer Wallet";
-      alert("Wallet connection was rejected or failed: " + (err.message || err));
+      alert("Connection request was rejected: " + (err.message || err));
     }
   } else {
-    alert("No Web3 wallet found! Please install MetaMask or Rabby in your browser to connect your wallet.");
+    alert("No Web3 wallet found! Please make sure Rabby Wallet or MetaMask is enabled in your browser extensions.");
   }
 }
 
 function setConnectedUI(addr) {
   isWalletConnected = true;
   const shortAddr = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-  walletBtn.innerText = `● Bradbury: ${shortAddr}`;
+  walletBtn.innerText = `● ${activeWalletName}: ${shortAddr}`;
   walletBtn.style.background = "#059669";
   walletBtn.style.color = "#ffffff";
   walletBtn.style.border = "1px solid #10b981";
 }
 
-if (typeof window.ethereum !== "undefined") {
-  window.ethereum.on("accountsChanged", (accounts) => {
+const prov = getWalletProvider();
+if (prov) {
+  prov.on("accountsChanged", (accounts) => {
     if (accounts.length > 0) {
       userAddress = accounts[0];
       setConnectedUI(userAddress);
@@ -272,10 +289,6 @@ if (typeof window.ethereum !== "undefined") {
       walletBtn.style.color = "";
       walletBtn.style.border = "";
     }
-  });
-
-  window.ethereum.on("chainChanged", () => {
-    window.location.reload();
   });
 }
 
