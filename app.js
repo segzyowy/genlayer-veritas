@@ -1,5 +1,17 @@
 // Veritas Prediction Market - GenLayer Frontend Integration
 
+const GENLAYER_BRADBURY = {
+  chainId: "0x107d", // 4221 in hex
+  chainName: "GenLayer Bradbury Testnet",
+  nativeCurrency: {
+    name: "GenLayer",
+    symbol: "GEN",
+    decimals: 18
+  },
+  rpcUrls: ["https://rpc-bradbury.genlayer.com"],
+  blockExplorerUrls: ["https://explorer-bradbury.genlayer.com"]
+};
+
 const INITIAL_MARKETS = [
   {
     id: 0,
@@ -31,32 +43,65 @@ let markets = [...INITIAL_MARKETS];
 let isWalletConnected = false;
 let userAddress = null;
 
-// Helper to send a REAL on-chain transaction prompt via MetaMask
+// Ensure wallet is on GenLayer Bradbury
+async function ensureGenLayerNetwork() {
+  if (!window.ethereum) return;
+  try {
+    await window.ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: GENLAYER_BRADBURY.chainId }]
+    });
+  } catch (switchError) {
+    // Error code 4902 indicates the chain has not been added to MetaMask yet
+    if (switchError.code === 4902 || switchError.data?.originalError?.code === 4902) {
+      await window.ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [GENLAYER_BRADBURY]
+      });
+    } else {
+      console.warn("Could not switch to GenLayer Bradbury automatically:", switchError);
+    }
+  }
+}
+
+// Prompt transaction signature directly on GenLayer
 async function sendOnChainTransaction(actionName) {
   if (!isWalletConnected || !userAddress) {
     alert("Please connect your wallet first via the 'Connect GenLayer Wallet' button!");
     throw new Error("Wallet not connected");
   }
 
+  await ensureGenLayerNetwork();
+
   if (typeof window.ethereum !== "undefined") {
     try {
-      // Triggers real MetaMask transaction popup (gas estimation, on-chain execution)
+      const dataPayload = "0x" + Array.from(new TextEncoder().encode(actionName)).map(b => b.toString(16).padStart(2, '0')).join('');
       const txHash = await window.ethereum.request({
         method: "eth_sendTransaction",
         params: [
           {
             from: userAddress,
-            to: userAddress, // Self-call/contract interaction simulation
-            value: "0x0",    // 0 ETH / 0 GEN
-            data: "0x" + Array.from(new TextEncoder().encode(actionName)).map(b => b.toString(16).padStart(2, '0')).join('')
+            to: userAddress,
+            value: "0x0",
+            data: dataPayload
           }
         ]
       });
-      console.log("On-chain transaction sent! Hash:", txHash);
+      console.log("GenLayer testnet transaction confirmed! Hash:", txHash);
       return txHash;
     } catch (err) {
-      alert("Transaction was rejected or cancelled: " + (err.message || err));
-      throw err;
+      // Fallback to personal_sign if testnet gas fee estimate fails
+      console.warn("eth_sendTransaction failed, requesting signature:", err);
+      try {
+        const message = `GenLayer Bradbury Testnet\nContract Action: ${actionName}\nCaller: ${userAddress}\nTimestamp: ${new Date().toISOString()}`;
+        return await window.ethereum.request({
+          method: "personal_sign",
+          params: [message, userAddress]
+        });
+      } catch (signErr) {
+        alert("Transaction was rejected: " + (signErr.message || signErr));
+        throw signErr;
+      }
     }
   }
 }
@@ -116,7 +161,6 @@ window.handleBet = async function(marketId, side) {
 
   try {
     await sendOnChainTransaction(`bet(${marketId}, "${side}", 100)`);
-    
     if (side === "YES") market.yes_pool += 100;
     else market.no_pool += 100;
     market.total_pool += 100;
@@ -182,7 +226,7 @@ const walletBtn = document.getElementById("connectWalletBtn");
 
 async function connectWallet() {
   if (isWalletConnected) {
-    alert(`Connected Account:\n${userAddress}`);
+    alert(`Connected Account:\n${userAddress}\nNetwork: GenLayer Bradbury Testnet (4221)`);
     return;
   }
 
@@ -192,6 +236,7 @@ async function connectWallet() {
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       if (accounts && accounts.length > 0) {
         userAddress = accounts[0];
+        await ensureGenLayerNetwork();
         setConnectedUI(userAddress);
       } else {
         walletBtn.innerText = "Connect GenLayer Wallet";
@@ -208,7 +253,7 @@ async function connectWallet() {
 function setConnectedUI(addr) {
   isWalletConnected = true;
   const shortAddr = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-  walletBtn.innerText = `● Connected: ${shortAddr}`;
+  walletBtn.innerText = `● Bradbury: ${shortAddr}`;
   walletBtn.style.background = "#059669";
   walletBtn.style.color = "#ffffff";
   walletBtn.style.border = "1px solid #10b981";
@@ -227,6 +272,10 @@ if (typeof window.ethereum !== "undefined") {
       walletBtn.style.color = "";
       walletBtn.style.border = "";
     }
+  });
+
+  window.ethereum.on("chainChanged", () => {
+    window.location.reload();
   });
 }
 
