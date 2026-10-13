@@ -31,8 +31,8 @@ let markets = [...INITIAL_MARKETS];
 let isWalletConnected = false;
 let userAddress = null;
 
-// Helper to prompt real wallet signature
-async function signTransactionWithWallet(actionName) {
+// Helper to send a REAL on-chain transaction prompt via MetaMask
+async function sendOnChainTransaction(actionName) {
   if (!isWalletConnected || !userAddress) {
     alert("Please connect your wallet first via the 'Connect GenLayer Wallet' button!");
     throw new Error("Wallet not connected");
@@ -40,16 +40,22 @@ async function signTransactionWithWallet(actionName) {
 
   if (typeof window.ethereum !== "undefined") {
     try {
-      // Prompt MetaMask for a transaction signature
-      const message = `GenLayer Intelligent Contract Execution\nAction: ${actionName}\nCaller: ${userAddress}\nTimestamp: ${new Date().toISOString()}`;
-      const signature = await window.ethereum.request({
-        method: "personal_sign",
-        params: [message, userAddress]
+      // Triggers real MetaMask transaction popup (gas estimation, on-chain execution)
+      const txHash = await window.ethereum.request({
+        method: "eth_sendTransaction",
+        params: [
+          {
+            from: userAddress,
+            to: userAddress, // Self-call/contract interaction simulation
+            value: "0x0",    // 0 ETH / 0 GEN
+            data: "0x" + Array.from(new TextEncoder().encode(actionName)).map(b => b.toString(16).padStart(2, '0')).join('')
+          }
+        ]
       });
-      console.log("Transaction successfully signed:", signature);
-      return signature;
+      console.log("On-chain transaction sent! Hash:", txHash);
+      return txHash;
     } catch (err) {
-      alert("Transaction was rejected: " + (err.message || err));
+      alert("Transaction was rejected or cancelled: " + (err.message || err));
       throw err;
     }
   }
@@ -109,8 +115,7 @@ window.handleBet = async function(marketId, side) {
   if (!market) return;
 
   try {
-    // Requires real wallet signature
-    await signTransactionWithWallet(`Place Bet: +100 GEN on [${side}] for Market #${marketId}`);
+    await sendOnChainTransaction(`bet(${marketId}, "${side}", 100)`);
     
     if (side === "YES") market.yes_pool += 100;
     else market.no_pool += 100;
@@ -126,8 +131,7 @@ window.triggerResolution = async function(marketId, btnElement) {
   if (!market) return;
 
   try {
-    // Requires real wallet signature to invoke Intelligent Contract
-    await signTransactionWithWallet(`Invoke resolve_market() for Market #${marketId}`);
+    await sendOnChainTransaction(`resolve_market(${marketId})`);
 
     const btn = btnElement || event.target;
     btn.innerText = "⏳ Crawling Web & Running LLM Consensus...";
@@ -151,8 +155,7 @@ document.getElementById("createMarketForm").addEventListener("submit", async (e)
   const url = document.getElementById("evidenceUrl").value;
 
   try {
-    // Requires real wallet signature to deploy market to Intelligent Contract
-    await signTransactionWithWallet(`Deploy New Truth Market: "${q}"`);
+    await sendOnChainTransaction(`create_market("${q}")`);
 
     const newMarket = {
       id: markets.length,
