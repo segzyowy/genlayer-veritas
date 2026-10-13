@@ -1,7 +1,7 @@
 // Veritas Prediction Market - GenLayer Frontend Integration
 
 const GENLAYER_BRADBURY = {
-  chainId: "0x107d", // 4221 in hex
+  chainId: "0x107d", // 4221
   chainName: "GenLayer Bradbury Testnet",
   nativeCurrency: {
     name: "GenLayer",
@@ -42,86 +42,66 @@ const INITIAL_MARKETS = [
 let markets = [...INITIAL_MARKETS];
 let isWalletConnected = false;
 let userAddress = null;
-let activeWalletName = "Wallet";
+let detectedProvider = null;
+let detectedWalletName = "Web3 Wallet";
 
-// Get active wallet provider (supports Rabby, MetaMask, Coinbase, etc.)
-function getWalletProvider() {
+// EIP-6963 Multi-provider discovery (Official Rabby & MetaMask standard)
+const eip6963Providers = [];
+window.addEventListener("eip6963:announceProvider", (event) => {
+  if (event.detail) {
+    eip6963Providers.push(event.detail);
+    console.log("Discovered wallet provider:", event.detail.info.name, event.detail.info.rdns);
+  }
+});
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+
+// Find the best provider (prioritizes Rabby if present)
+function resolveProvider() {
+  // 1. Check EIP-6963 announced providers for Rabby
+  const rabbyAnnounced = eip6963Providers.find(p => p.info.rdns === "io.rabby" || p.info.name.toLowerCase().includes("rabby"));
+  if (rabbyAnnounced) {
+    detectedWalletName = "Rabby";
+    return rabbyAnnounced.provider;
+  }
+
+  // 2. Direct window.rabby injection
   if (typeof window.rabby !== "undefined") {
-    activeWalletName = "Rabby";
+    detectedWalletName = "Rabby";
     return window.rabby;
   }
+
+  // 3. Check window.ethereum with isRabby flag
   if (typeof window.ethereum !== "undefined") {
-    if (window.ethereum.isRabby) activeWalletName = "Rabby";
-    else if (window.ethereum.isMetaMask) activeWalletName = "MetaMask";
+    if (window.ethereum.isRabby) {
+      detectedWalletName = "Rabby";
+      return window.ethereum;
+    }
+    // Check providers array (if multiple wallets installed)
+    if (Array.isArray(window.ethereum.providers)) {
+      const r = window.ethereum.providers.find(p => p.isRabby);
+      if (r) {
+        detectedWalletName = "Rabby";
+        return r;
+      }
+      return window.ethereum.providers[0];
+    }
+    detectedWalletName = window.ethereum.isMetaMask ? "MetaMask" : "Ethereum";
     return window.ethereum;
   }
+
+  // 4. Any other EIP-6963 provider
+  if (eip6963Providers.length > 0) {
+    detectedWalletName = eip6963Providers[0].info.name;
+    return eip6963Providers[0].provider;
+  }
+
   return null;
 }
 
-// Ensure network is GenLayer Bradbury without blocking connection
-async function trySwitchToGenLayer(provider) {
-  try {
-    await provider.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: GENLAYER_BRADBURY.chainId }]
-    });
-  } catch (switchError) {
-    if (switchError.code === 4902 || switchError.data?.originalError?.code === 4902 || switchError.code === -32603) {
-      try {
-        await provider.request({
-          method: "wallet_addEthereumChain",
-          params: [GENLAYER_BRADBURY]
-        });
-      } catch (addError) {
-        console.warn("User dismissed adding GenLayer Bradbury chain:", addError);
-      }
-    }
-  }
-}
-
-// Prompt transaction signature directly on Rabby / MetaMask
-async function sendOnChainTransaction(actionName) {
-  const provider = getWalletProvider();
-  if (!isWalletConnected || !userAddress || !provider) {
-    alert("Please connect your Rabby or Web3 wallet first!");
-    throw new Error("Wallet not connected");
-  }
-
-  // Attempt to switch to Bradbury if not already on it
-  await trySwitchToGenLayer(provider);
-
-  try {
-    const dataPayload = "0x" + Array.from(new TextEncoder().encode(actionName)).map(b => b.toString(16).padStart(2, '0')).join('');
-    const txHash = await provider.request({
-      method: "eth_sendTransaction",
-      params: [
-        {
-          from: userAddress,
-          to: userAddress,
-          value: "0x0",
-          data: dataPayload
-        }
-      ]
-    });
-    console.log("Transaction sent! Hash:", txHash);
-    return txHash;
-  } catch (err) {
-    console.warn("eth_sendTransaction skipped, requesting personal_sign approval in " + activeWalletName + ":", err);
-    try {
-      const message = `GenLayer Bradbury Testnet\nAction: ${actionName}\nCaller: ${userAddress}\nTimestamp: ${new Date().toISOString()}`;
-      return await provider.request({
-        method: "personal_sign",
-        params: [message, userAddress]
-      });
-    } catch (signErr) {
-      alert("Transaction was rejected: " + (signErr.message || signErr));
-      throw signErr;
-    }
-  }
-}
-
+// Render Markets list
 function renderMarkets() {
   const container = document.getElementById("marketsList");
+  if (!container) return;
   container.innerHTML = "";
 
   markets.forEach(m => {
@@ -169,18 +149,50 @@ function renderMarkets() {
   });
 }
 
+// Request real signature / transaction
+async function executeWalletAction(actionName) {
+  if (!isWalletConnected || !userAddress || !detectedProvider) {
+    alert("Please connect your wallet first via 'Connect GenLayer Wallet'!");
+    throw new Error("Wallet not connected");
+  }
+
+  try {
+    const dataPayload = "0x" + Array.from(new TextEncoder().encode(actionName)).map(b => b.toString(16).padStart(2, '0')).join('');
+    return await detectedProvider.request({
+      method: "eth_sendTransaction",
+      params: [{
+        from: userAddress,
+        to: userAddress,
+        value: "0x0",
+        data: dataPayload
+      }]
+    });
+  } catch (txErr) {
+    console.warn("eth_sendTransaction cancelled, requesting personal_sign fallback:", txErr);
+    try {
+      const msg = `GenLayer Bradbury Testnet\nAction: ${actionName}\nCaller: ${userAddress}\nTime: ${new Date().toISOString()}`;
+      return await detectedProvider.request({
+        method: "personal_sign",
+        params: [msg, userAddress]
+      });
+    } catch (signErr) {
+      alert("Action cancelled: " + (signErr.message || signErr));
+      throw signErr;
+    }
+  }
+}
+
 window.handleBet = async function(marketId, side) {
   const market = markets.find(m => m.id === marketId);
   if (!market) return;
-
   try {
-    await sendOnChainTransaction(`bet(${marketId}, "${side}", 100)`);
+    await executeWalletAction(`bet(${marketId}, "${side}", 100)`);
     if (side === "YES") market.yes_pool += 100;
     else market.no_pool += 100;
     market.total_pool += 100;
     renderMarkets();
-  } catch (err) {
-    console.log("Bet cancelled.");
+  } catch (e) {
+    console.log("Bet aborted.");
   }
 };
 
@@ -189,8 +201,7 @@ window.triggerResolution = async function(marketId, btnElement) {
   if (!market) return;
 
   try {
-    await sendOnChainTransaction(`resolve_market(${marketId})`);
-
+    await executeWalletAction(`resolve_market(${marketId})`);
     const btn = btnElement || event.target;
     btn.innerText = "⏳ Crawling Web & Running LLM Consensus...";
     btn.disabled = true;
@@ -201,98 +212,80 @@ window.triggerResolution = async function(marketId, btnElement) {
       market.resolution_reason = "Evaluated current source metrics. Criteria not satisfied by the target deadline. Confirmed by validator LLM majority.";
       renderMarkets();
     }, 1800);
-  } catch (err) {
-    console.log("Resolution cancelled.");
+  } catch (e) {
+    console.log("Resolution aborted.");
   }
 };
 
-document.getElementById("createMarketForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const q = document.getElementById("marketQuestion").value;
-  const c = document.getElementById("marketCriteria").value;
-  const url = document.getElementById("evidenceUrl").value;
+const createForm = document.getElementById("createMarketForm");
+if (createForm) {
+  createForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const q = document.getElementById("marketQuestion").value;
+    const c = document.getElementById("marketCriteria").value;
+    const url = document.getElementById("evidenceUrl").value;
 
-  try {
-    await sendOnChainTransaction(`create_market("${q}")`);
-
-    const newMarket = {
-      id: markets.length,
-      question: q,
-      criteria: c,
-      evidence_url: url,
-      resolved: false,
-      outcome: null,
-      resolution_reason: "",
-      yes_pool: 0,
-      no_pool: 0,
-      total_pool: 0
-    };
-
-    markets.unshift(newMarket);
-    renderMarkets();
-    e.target.reset();
-  } catch (err) {
-    console.log("Market creation cancelled.");
-  }
-});
-
-const walletBtn = document.getElementById("connectWalletBtn");
-
-async function connectWallet() {
-  const provider = getWalletProvider();
-
-  if (isWalletConnected) {
-    alert(`Connected with ${activeWalletName}:\n${userAddress}`);
-    return;
-  }
-
-  if (provider) {
     try {
-      walletBtn.innerText = "Connecting...";
-      const accounts = await provider.request({ method: "eth_requestAccounts" });
-      if (accounts && accounts.length > 0) {
-        userAddress = accounts[0];
-        setConnectedUI(userAddress);
-        trySwitchToGenLayer(provider); // Non-blocking network check
-      } else {
-        walletBtn.innerText = "Connect GenLayer Wallet";
-      }
+      await executeWalletAction(`create_market("${q}")`);
+      const newMarket = {
+        id: markets.length,
+        question: q,
+        criteria: c,
+        evidence_url: url,
+        resolved: false,
+        outcome: null,
+        resolution_reason: "",
+        yes_pool: 0,
+        no_pool: 0,
+        total_pool: 0
+      };
+      markets.unshift(newMarket);
+      renderMarkets();
+      e.target.reset();
     } catch (err) {
-      walletBtn.innerText = "Connect GenLayer Wallet";
-      alert("Connection request was rejected: " + (err.message || err));
-    }
-  } else {
-    alert("No Web3 wallet found! Please make sure Rabby Wallet or MetaMask is enabled in your browser extensions.");
-  }
-}
-
-function setConnectedUI(addr) {
-  isWalletConnected = true;
-  const shortAddr = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-  walletBtn.innerText = `● ${activeWalletName}: ${shortAddr}`;
-  walletBtn.style.background = "#059669";
-  walletBtn.style.color = "#ffffff";
-  walletBtn.style.border = "1px solid #10b981";
-}
-
-const prov = getWalletProvider();
-if (prov) {
-  prov.on("accountsChanged", (accounts) => {
-    if (accounts.length > 0) {
-      userAddress = accounts[0];
-      setConnectedUI(userAddress);
-    } else {
-      isWalletConnected = false;
-      userAddress = null;
-      walletBtn.innerText = "Connect GenLayer Wallet";
-      walletBtn.style.background = "";
-      walletBtn.style.color = "";
-      walletBtn.style.border = "";
+      console.log("Creation aborted.");
     }
   });
 }
 
-walletBtn.addEventListener("click", connectWallet);
+const walletBtn = document.getElementById("connectWalletBtn");
 
-// Initial Render
+async function connectWallet() {
+  if (isWalletConnected) {
+    alert(`Connected with ${detectedWalletName}:\nAccount: ${userAddress}\nChain: GenLayer Bradbury`);
+    return;
+  }
+
+  detectedProvider = resolveProvider();
+
+  if (!detectedProvider) {
+    alert("No Web3 wallet extension detected!\nIf using Rabby, make sure the Rabby extension is pinned and enabled.");
+    return;
+  }
+
+  walletBtn.innerText = "Connecting...";
+
+  try {
+    const accounts = await detectedProvider.request({ method: "eth_requestAccounts" });
+    if (accounts && accounts.length > 0) {
+      userAddress = accounts[0];
+      isWalletConnected = true;
+      const shortAddr = `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}`;
+      walletBtn.innerText = `● ${detectedWalletName}: ${shortAddr}`;
+      walletBtn.style.background = "#059669";
+      walletBtn.style.color = "#ffffff";
+      walletBtn.style.border = "1px solid #10b981";
+    } else {
+      walletBtn.innerText = "Connect GenLayer Wallet";
+    }
+  } catch (err) {
+    walletBtn.innerText = "Connect GenLayer Wallet";
+    alert(`Rabby connection failed: ${err.message || err}\n\nTip: Click the Rabby extension icon in your browser toolbar to ensure Rabby is unlocked.`);
+  }
+}
+
+if (walletBtn) {
+  walletBtn.addEventListener("click", connectWallet);
+}
+
 renderMarkets();
