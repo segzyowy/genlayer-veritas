@@ -28,7 +28,8 @@ const INITIAL_MARKETS = [
 ];
 
 let markets = [...INITIAL_MARKETS];
-let connectedAccount = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
+let isWalletConnected = false;
+let userAddress = null;
 
 function renderMarkets() {
   const container = document.getElementById("marketsList");
@@ -44,40 +45,33 @@ function renderMarkets() {
     div.innerHTML = `
       <div class="market-header">
         <div>
-          <h3 class="market-title">${m.question}</h3>
-          <p class="market-desc">${m.criteria}</p>
+          <div class="market-title">${m.question}</div>
+          <div class="market-criteria"><strong>AI Resolution Rule:</strong> ${m.criteria}</div>
+          <div class="market-criteria"><strong>Evidence Source:</strong> <a href="${m.evidence_url}" target="_blank" style="color: #818cf8; text-decoration: underline;">${m.evidence_url}</a></div>
         </div>
-        ${
-          m.resolved
-            ? `<span class="resolved-pill resolved-${m.outcome.toLowerCase()}">Resolved: ${m.outcome}</span>`
-            : `<span style="font-size: 0.8rem; color: #10b981; font-weight: 600;">ACTIVE</span>`
-        }
+        <span class="status-badge ${m.resolved ? 'status-resolved' : 'status-active'}">
+          ${m.resolved ? 'RESOLVED (' + m.outcome + ')' : 'ACTIVE'}
+        </span>
       </div>
 
-      <div class="evidence-box">
-        <strong>Evidence Source:</strong> <a href="${m.evidence_url}" target="_blank" style="color: inherit; text-decoration: underline;">${m.evidence_url}</a>
-      </div>
-
-      <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px;">
-        <span style="color: var(--yes-color); font-weight: 600;">YES: ${yesPct}% (${m.yes_pool} GEN)</span>
-        <span style="color: var(--no-color); font-weight: 600;">NO: ${noPct}% (${m.no_pool} GEN)</span>
-      </div>
-
-      <div class="pool-bars">
-        <div class="bar-yes" style="width: ${yesPct}%"></div>
-        <div class="bar-no" style="width: ${noPct}%"></div>
+      <div class="probability-bar">
+        <div class="prob-yes" style="width: ${yesPct}%;">${yesPct > 15 ? 'YES ' + yesPct + '%' : ''}</div>
+        <div class="prob-no" style="width: ${noPct}%;">${noPct > 15 ? 'NO ' + noPct + '%' : ''}</div>
       </div>
 
       ${
         m.resolved
-          ? `<div class="reason-box"><strong>GenLayer Arbiter Reason:</strong> ${m.resolution_reason}</div>`
+          ? `
+          <div class="ai-rationale">
+            <strong>GenLayer Validator Consensus Verdict:</strong> ${m.outcome}<br>
+            <span style="display:inline-block; margin-top: 4px;"><strong>AI Rationale:</strong> ${m.resolution_reason}</span>
+          </div>
+          `
           : `
-          <div class="market-actions">
-            <div>
-              <button class="bet-btn bet-yes" onclick="handleBet(${m.id}, 'YES')">Bet YES (+100)</button>
-              <button class="bet-btn bet-no" onclick="handleBet(${m.id}, 'NO')">Bet NO (+100)</button>
-            </div>
-            <button class="resolve-btn" onclick="triggerResolution(${m.id})">Trigger GenLayer Resolution</button>
+          <div class="action-row">
+            <button class="btn btn-yes" onclick="handleBet(${m.id}, 'YES')">Bet YES (+100 GEN)</button>
+            <button class="btn btn-no" onclick="handleBet(${m.id}, 'NO')">Bet NO (+100 GEN)</button>
+            <button class="btn btn-resolve" onclick="triggerResolution(${m.id}, this)">Trigger AI Resolution</button>
           </div>
           `
       }
@@ -95,15 +89,14 @@ window.handleBet = function(marketId, side) {
   renderMarkets();
 };
 
-window.triggerResolution = async function(marketId) {
+window.triggerResolution = async function(marketId, btnElement) {
   const market = markets.find(m => m.id === marketId);
   if (!market) return;
 
-  const btn = event.target;
-  btn.innerText = "Crawling Web & Running LLM Consensus...";
+  const btn = btnElement || event.target;
+  btn.innerText = "⏳ Crawling Web & Running LLM Consensus...";
   btn.disabled = true;
 
-  // Simulate GenLayer transaction call to `resolve_market(marketId)`
   setTimeout(() => {
     market.resolved = true;
     market.outcome = "NO";
@@ -137,9 +130,42 @@ document.getElementById("createMarketForm").addEventListener("submit", (e) => {
   alert("Market submitted to GenLayer Intelligent Contract!");
 });
 
-document.getElementById("connectWalletBtn").addEventListener("click", () => {
-  alert(`Connected to GenLayer Testnet: ${connectedAccount.slice(0, 6)}...${connectedAccount.slice(-4)}`);
-});
+const walletBtn = document.getElementById("connectWalletBtn");
+
+async function connectWallet() {
+  if (isWalletConnected) {
+    alert(`Connected Account: ${userAddress}\nNetwork: GenLayer Testnet (Chain ID 42161)`);
+    return;
+  }
+
+  if (window.ethereum) {
+    try {
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      if (accounts && accounts.length > 0) {
+        userAddress = accounts[0];
+        setConnectedUI(userAddress);
+        return;
+      }
+    } catch (err) {
+      console.warn("User rejected Web3 connection, falling back to simulated GenLayer account:", err);
+    }
+  }
+
+  userAddress = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
+  setConnectedUI(userAddress);
+}
+
+function setConnectedUI(addr) {
+  isWalletConnected = true;
+  const shortAddr = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+  walletBtn.innerText = `● Connected: ${shortAddr}`;
+  walletBtn.style.background = "#059669";
+  walletBtn.style.color = "#ffffff";
+  walletBtn.style.border = "1px solid #10b981";
+  walletBtn.title = "Click to view account info";
+}
+
+walletBtn.addEventListener("click", connectWallet);
 
 // Initial Render
 renderMarkets();
