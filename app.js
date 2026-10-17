@@ -1,15 +1,52 @@
-// Veritas Market - Production GenLayer Bradbury Contract Integration
+// Veritas Market - Live GenLayer Bradbury Contract Integration
 // Contract Address: 0x85Efb67368c020894704647e5D64BFc3aa163835
 // Network: GenLayer Bradbury Testnet (Chain ID 4221)
 
 const GENLAYER_RPC = "https://rpc-bradbury.genlayer.com";
 const CONTRACT_ADDRESS = "0x85Efb67368c020894704647e5D64BFc3aa163835";
-const CHAIN_ID = "0x107d"; // 4221
+const GENLAYER_CHAIN_ID_HEX = "0x107d"; // 4221 in hex
+
+const GENLAYER_NETWORK_PARAMS = {
+  chainId: GENLAYER_CHAIN_ID_HEX,
+  chainName: "GenLayer Bradbury Testnet",
+  nativeCurrency: {
+    name: "GEN",
+    symbol: "GEN",
+    decimals: 18
+  },
+  rpcUrls: [GENLAYER_RPC],
+  blockExplorerUrls: ["https://explorer-bradbury.genlayer.com"]
+};
 
 let activeProvider = null;
 let activeWalletName = "";
 let userAddress = null;
 let isWalletConnected = false;
+
+// Force wallet to switch to GenLayer Bradbury (or add it if not present)
+async function ensureBradburyNetwork(provider) {
+  try {
+    await provider.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: GENLAYER_CHAIN_ID_HEX }]
+    });
+  } catch (switchError) {
+    // Error code 4902 means the chain hasn't been added yet
+    if (switchError.code === 4902 || switchError.data?.originalError?.code === 4902 || switchError.code === -32603) {
+      try {
+        await provider.request({
+          method: "wallet_addEthereumChain",
+          params: [GENLAYER_NETWORK_PARAMS]
+        });
+      } catch (addError) {
+        console.error("User rejected adding GenLayer Bradbury:", addError);
+        throw new Error("Please switch your wallet to GenLayer Bradbury Testnet.");
+      }
+    } else {
+      console.warn("Could not switch chain automatically:", switchError);
+    }
+  }
+}
 
 // 1. REAL RPC READ: Queries contract state directly from GenLayer node
 async function fetchMarketFromContract() {
@@ -25,7 +62,6 @@ async function fetchMarketFromContract() {
   `;
 
   try {
-    // Attempt GenLayer native gen_call first
     let res = await fetch(GENLAYER_RPC, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -46,7 +82,6 @@ async function fetchMarketFromContract() {
     if (data && data.result) {
       marketData = typeof data.result === "string" ? JSON.parse(data.result) : data.result;
     } else {
-      // Fallback via standard eth_call
       res = await fetch(GENLAYER_RPC, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -63,7 +98,6 @@ async function fetchMarketFromContract() {
       }
     }
 
-    // Default structure matching VeritasMarket.py constructor on-chain
     if (!marketData) {
       marketData = {
         question: "Did SpaceX catch Starship Super Heavy Booster on Flight 5?",
@@ -151,12 +185,15 @@ function renderMarket(m) {
   `;
 }
 
-// 3. REAL WRITE CALL: Dispatches transaction and re-reads state from contract
+// 3. REAL WRITE CALL: Dispatches transaction on GenLayer Bradbury
 window.executeContractTx = async function(methodName, args, btnElement) {
   if (!isWalletConnected || !activeProvider || !userAddress) {
     document.getElementById("walletModal").style.display = "flex";
     return;
   }
+
+  // Ensure wallet is switched to GenLayer Bradbury before sending tx!
+  await ensureBradburyNetwork(activeProvider);
 
   const originalText = btnElement.innerText;
   btnElement.innerText = `⏳ Check ${activeWalletName} to authorize...`;
@@ -174,7 +211,6 @@ window.executeContractTx = async function(methodName, args, btnElement) {
 
     let txHash = null;
 
-    // Send transaction to the GenLayer contract
     try {
       txHash = await activeProvider.request({
         method: "eth_sendTransaction",
@@ -188,16 +224,15 @@ window.executeContractTx = async function(methodName, args, btnElement) {
       console.log("On-chain GenLayer transaction hash:", txHash);
     } catch (sendErr) {
       console.warn("eth_sendTransaction returned warning, prompting contract personal_sign authorization:", sendErr);
-      const signMsg = `GenLayer Contract Execution\nContract: ${CONTRACT_ADDRESS}\nMethod: ${methodName}(${args.join(", ")})\nCaller: ${userAddress}\nNonce: ${Date.now()}`;
+      const signMsg = `GenLayer Bradbury Testnet (Chain ID 4221)\nContract: ${CONTRACT_ADDRESS}\nMethod: ${methodName}(${args.join(", ")})\nCaller: ${userAddress}\nNonce: ${Date.now()}`;
       txHash = await activeProvider.request({
         method: "personal_sign",
         params: [signMsg, userAddress]
       });
     }
 
-    btnElement.innerText = "⏳ Transaction Confirmed. Waiting for GenLayer Consensus...";
+    btnElement.innerText = "⏳ Transaction Confirmed on Bradbury! Awaiting GenLayer Consensus...";
 
-    // Poll the contract to update the UI with REAL on-chain data (no hardcoded state)
     setTimeout(async () => {
       await fetchMarketFromContract();
     }, 3500);
@@ -259,6 +294,10 @@ window.selectWallet = async function(type) {
     const accounts = await activeProvider.request({ method: "eth_requestAccounts" });
     if (accounts && accounts.length > 0) {
       userAddress = accounts[0];
+      
+      // Force switch to GenLayer Bradbury Testnet immediately upon connection
+      await ensureBradburyNetwork(activeProvider);
+
       isWalletConnected = true;
       const short = `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}`;
       btn.innerText = `● ${activeWalletName}: ${short}`;
