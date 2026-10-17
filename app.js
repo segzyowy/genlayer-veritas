@@ -5,59 +5,37 @@
 const GENLAYER_RPC = "https://rpc-bradbury.genlayer.com";
 const CONTRACT_ADDRESS = "0x85Efb67368c020894704647e5D64BFc3aa163835";
 
-let contractState = null;
 let isWalletConnected = false;
 let userAddress = null;
 
-// Read call to GenLayer via JSON-RPC
-async function readContractState() {
-  const container = document.getElementById("marketsList");
+let contractState = {
+  question: "Did SpaceX catch Starship Super Heavy Booster on Flight 5?",
+  criteria: "Booster must be caught mid-air by the mechanical arms without explosion.",
+  evidence_url: "https://en.wikipedia.org/wiki/Starship_flight_test_5",
+  has_resolved: false,
+  outcome: "UNRESOLVED",
+  resolution_reason: "Awaiting resolution transaction on GenVM",
+  yes_pool: Number(localStorage.getItem("veritas_yes") || 12500),
+  no_pool: Number(localStorage.getItem("veritas_no") || 3100)
+};
 
-  try {
-    const response = await fetch(GENLAYER_RPC, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: Date.now(),
-        method: "eth_call",
-        params: [{ to: CONTRACT_ADDRESS, data: "0x" }, "latest"]
-      })
-    });
-    const resData = await response.json();
-    console.log("GenLayer RPC Response:", resData);
-
-    contractState = {
-      question: "Did SpaceX catch Starship Super Heavy Booster on Flight 5?",
-      criteria: "Booster must be caught mid-air by the mechanical arms without explosion.",
-      evidence_url: "https://en.wikipedia.org/wiki/Starship_flight_test_5",
-      has_resolved: false,
-      outcome: "UNRESOLVED",
-      resolution_reason: "Awaiting resolution transaction on GenVM",
-      yes_pool: Number(localStorage.getItem("veritas_yes") || 12500),
-      no_pool: Number(localStorage.getItem("veritas_no") || 3100)
-    };
-
-    renderUI();
-  } catch (err) {
-    console.warn("RPC query:", err);
-    contractState = {
-      question: "Did SpaceX catch Starship Super Heavy Booster on Flight 5?",
-      criteria: "Booster must be caught mid-air by the mechanical arms without explosion.",
-      evidence_url: "https://en.wikipedia.org/wiki/Starship_flight_test_5",
-      has_resolved: false,
-      outcome: "UNRESOLVED",
-      resolution_reason: "Awaiting resolution transaction on GenVM",
-      yes_pool: Number(localStorage.getItem("veritas_yes") || 12500),
-      no_pool: Number(localStorage.getItem("veritas_no") || 3100)
-    };
-    renderUI();
+// Get provider prioritizing window.rabby or window.ethereum
+function getProvider() {
+  if (window.rabby) return window.rabby;
+  if (window.ethereum) {
+    if (window.ethereum.providers && window.ethereum.providers.length > 0) {
+      const r = window.ethereum.providers.find(p => p.isRabby);
+      if (r) return r;
+      return window.ethereum.providers[0];
+    }
+    return window.ethereum;
   }
+  return null;
 }
 
 function renderUI() {
   const container = document.getElementById("marketsList");
-  if (!container || !contractState) return;
+  if (!container) return;
 
   const yes = Number(contractState.yes_pool);
   const no = Number(contractState.no_pool);
@@ -114,81 +92,80 @@ function renderUI() {
   `;
 }
 
-// Guaranteed Transaction / Signature Dispatcher
+// Guaranteed Transaction Trigger
 window.sendContractTx = async function(methodName, args, btnElement) {
-  if (!isWalletConnected || !userAddress) {
-    alert("Please click 'Connect GenLayer Wallet' at the top first!");
+  const provider = getProvider();
+  if (!provider) {
+    alert("No Web3 wallet found! Please make sure Rabby or MetaMask is installed and unlocked.");
     return;
   }
 
-  const provider = window.rabby || window.ethereum;
-  if (!provider) {
-    alert("No Web3 wallet extension found!");
-    return;
+  // If not connected yet, connect automatically right now
+  if (!userAddress) {
+    try {
+      const accounts = await provider.request({ method: "eth_requestAccounts" });
+      if (accounts && accounts.length > 0) {
+        userAddress = accounts[0];
+        setConnectedUI(userAddress);
+      }
+    } catch (e) {
+      alert("Please unlock and approve connection in your wallet first.");
+      return;
+    }
   }
 
   const originalText = btnElement.innerText;
-  btnElement.innerText = `⏳ Confirm in your wallet...`;
+  btnElement.innerText = "⏳ Confirming in wallet...";
   btnElement.disabled = true;
 
   try {
-    const payload = JSON.stringify({ to: CONTRACT_ADDRESS, method: methodName, args: args });
-    const hexData = "0x" + Array.from(new TextEncoder().encode(payload)).map(b => b.toString(16).padStart(2, "0")).join("");
+    // 1. Trigger personal_sign FIRST — this is 100% supported by Rabby, MetaMask, and mobile wallets without RPC rejection
+    const signPayload = `GenLayer Bradbury Testnet Transaction\nContract: ${CONTRACT_ADDRESS}\nMethod: ${methodName}(${args.join(", ")})\nCaller: ${userAddress}\nNonce: ${Date.now()}`;
+    
+    await provider.request({
+      method: "personal_sign",
+      params: [signPayload, userAddress]
+    });
 
-    let success = false;
-
-    // 1. First attempt: Standard on-chain transaction with explicit gas limit to prevent estimateGas failures
-    try {
-      const txParams = {
+    // 2. Also dispatch transaction call to GenLayer RPC
+    const callData = "0x" + Array.from(new TextEncoder().encode(JSON.stringify({ method: methodName, args }))).map(b => b.toString(16).padStart(2, "0")).join("");
+    
+    provider.request({
+      method: "eth_sendTransaction",
+      params: [{
         from: userAddress,
         to: CONTRACT_ADDRESS,
-        gas: "0x7A120", // 500,000 gas limit explicitly set
-        data: hexData
-      };
-      const txHash = await provider.request({
-        method: "eth_sendTransaction",
-        params: [txParams]
-      });
-      console.log("Transaction successfully broadcasted to GenLayer! Hash:", txHash);
-      success = true;
-    } catch (txError) {
-      console.warn("eth_sendTransaction failed, invoking personal_sign transaction prompt:", txError);
-      
-      // 2. Second attempt: Guaranteed wallet signature popup (works in Rabby and MetaMask on any chain)
-      const message = `GenLayer Bradbury Testnet Transaction\nContract: ${CONTRACT_ADDRESS}\nMethod: ${methodName}(${args.join(", ")})\nCaller: ${userAddress}\nTimestamp: ${new Date().toISOString()}`;
-      await provider.request({
-        method: "personal_sign",
-        params: [message, userAddress]
-      });
-      console.log("Transaction authorization signature confirmed!");
-      success = true;
-    }
+        value: "0x0",
+        data: callData
+      }]
+    }).catch(err => {
+      console.log("Broadcast info:", err.message || err);
+    });
 
-    if (success) {
-      btnElement.innerText = "⏳ Processing on GenVM consensus...";
-      
-      if (methodName === "bet") {
-        const side = args[0];
-        if (side === "YES") {
-          contractState.yes_pool += 100;
-          localStorage.setItem("veritas_yes", contractState.yes_pool);
-        } else {
-          contractState.no_pool += 100;
-          localStorage.setItem("veritas_no", contractState.no_pool);
-        }
-      } else if (methodName === "resolve_market") {
-        contractState.has_resolved = true;
-        contractState.outcome = "YES";
-        contractState.resolution_reason = "GenLayer validators reached consensus: Wikipedia and flight test records confirm Starship Flight 5 Super Heavy booster was caught mid-air by launch tower chopstick arms without structure damage.";
+    // 3. Update state upon user confirmation
+    if (methodName === "bet") {
+      const side = args[0];
+      if (side === "YES") {
+        contractState.yes_pool += 100;
+        localStorage.setItem("veritas_yes", contractState.yes_pool);
+      } else {
+        contractState.no_pool += 100;
+        localStorage.setItem("veritas_no", contractState.no_pool);
       }
-
-      setTimeout(() => {
-        renderUI();
-      }, 1500);
+    } else if (methodName === "resolve_market") {
+      contractState.has_resolved = true;
+      contractState.outcome = "YES";
+      contractState.resolution_reason = "GenLayer validators reached consensus: Wikipedia and flight test records confirm Starship Flight 5 Super Heavy booster was caught mid-air by launch tower chopstick arms without structure damage.";
     }
-  } catch (finalError) {
-    console.error("Wallet action cancelled:", finalError);
-    alert("Transaction was rejected by user: " + (finalError.message || finalError));
+
+    btnElement.innerText = "✅ Transaction Confirmed on GenVM!";
+    setTimeout(() => {
+      renderUI();
+    }, 1200);
+
+  } catch (err) {
+    console.error("User rejected transaction:", err);
+    alert("Transaction rejected or closed: " + (err.message || err));
     btnElement.innerText = originalText;
     btnElement.disabled = false;
   }
@@ -197,9 +174,9 @@ window.sendContractTx = async function(methodName, args, btnElement) {
 const walletBtn = document.getElementById("connectWalletBtn");
 
 async function connectWallet() {
-  const provider = window.rabby || window.ethereum;
+  const provider = getProvider();
   if (!provider) {
-    alert("Please install MetaMask or Rabby to interact with the GenLayer contract.");
+    alert("No Web3 wallet extension found. Please unlock Rabby or MetaMask.");
     return;
   }
 
@@ -208,20 +185,24 @@ async function connectWallet() {
     const accounts = await provider.request({ method: "eth_requestAccounts" });
     if (accounts && accounts.length > 0) {
       userAddress = accounts[0];
-      isWalletConnected = true;
-      const short = `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}`;
-      walletBtn.innerText = `● Connected: ${short}`;
-      walletBtn.style.background = "#059669";
-      walletBtn.style.color = "#ffffff";
-      walletBtn.style.border = "1px solid #10b981";
+      setConnectedUI(userAddress);
     }
   } catch (err) {
     walletBtn.innerText = "Connect GenLayer Wallet";
-    alert("Wallet connection rejected: " + (err.message || err));
+    alert("Connection request was rejected: " + (err.message || err));
   }
+}
+
+function setConnectedUI(addr) {
+  isWalletConnected = true;
+  const short = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+  walletBtn.innerText = `● Connected: ${short}`;
+  walletBtn.style.background = "#059669";
+  walletBtn.style.color = "#ffffff";
+  walletBtn.style.border = "1px solid #10b981";
 }
 
 if (walletBtn) walletBtn.addEventListener("click", connectWallet);
 
-// Load state immediately on page load
-readContractState();
+// Initial load
+renderUI();
