@@ -2,11 +2,12 @@
 // Contract Address: 0x85Efb67368c020894704647e5D64BFc3aa163835
 // Network: GenLayer Bradbury Testnet (Chain ID 4221)
 
-const GENLAYER_RPC = "https://rpc-bradbury.genlayer.com";
 const CONTRACT_ADDRESS = "0x85Efb67368c020894704647e5D64BFc3aa163835";
 
-let isWalletConnected = false;
+let activeProvider = null;
+let activeWalletName = "";
 let userAddress = null;
+let isWalletConnected = false;
 
 let contractState = {
   question: "Did SpaceX catch Starship Super Heavy Booster on Flight 5?",
@@ -19,19 +20,69 @@ let contractState = {
   no_pool: Number(localStorage.getItem("veritas_no") || 3100)
 };
 
-// Get provider prioritizing window.rabby or window.ethereum
-function getProvider() {
-  if (window.rabby) return window.rabby;
-  if (window.ethereum) {
-    if (window.ethereum.providers && window.ethereum.providers.length > 0) {
-      const r = window.ethereum.providers.find(p => p.isRabby);
-      if (r) return r;
-      return window.ethereum.providers[0];
-    }
-    return window.ethereum;
+// Modal handlers
+window.closeWalletModal = function() {
+  document.getElementById("walletModal").style.display = "none";
+};
+
+document.getElementById("connectWalletBtn").addEventListener("click", () => {
+  if (isWalletConnected) {
+    alert(`Connected Account: ${userAddress}\nWallet: ${activeWalletName}\nContract: ${CONTRACT_ADDRESS}`);
+    return;
   }
-  return null;
-}
+  document.getElementById("walletModal").style.display = "flex";
+});
+
+// Explicit wallet connector resolving extension clash
+window.selectWallet = async function(walletType) {
+  closeWalletModal();
+  const btn = document.getElementById("connectWalletBtn");
+  btn.innerText = "Connecting...";
+
+  if (walletType === "rabby") {
+    // Specifically target Rabby
+    if (window.rabby) {
+      activeProvider = window.rabby;
+    } else if (window.ethereum && window.ethereum.providers) {
+      activeProvider = window.ethereum.providers.find(p => p.isRabby) || window.ethereum;
+    } else if (window.ethereum && window.ethereum.isRabby) {
+      activeProvider = window.ethereum;
+    } else {
+      alert("Rabby Wallet not detected! Please ensure Rabby extension is installed & enabled.");
+      btn.innerText = "Connect GenLayer Wallet";
+      return;
+    }
+    activeWalletName = "Rabby";
+  } else {
+    // Specifically target MetaMask
+    if (window.ethereum && window.ethereum.providers) {
+      activeProvider = window.ethereum.providers.find(p => p.isMetaMask && !p.isRabby) || window.ethereum;
+    } else if (window.ethereum) {
+      activeProvider = window.ethereum;
+    } else {
+      alert("MetaMask not detected! Please ensure MetaMask extension is installed.");
+      btn.innerText = "Connect GenLayer Wallet";
+      return;
+    }
+    activeWalletName = "MetaMask";
+  }
+
+  try {
+    const accounts = await activeProvider.request({ method: "eth_requestAccounts" });
+    if (accounts && accounts.length > 0) {
+      userAddress = accounts[0];
+      isWalletConnected = true;
+      const short = `${userAddress.slice(0, 6)}...${userAddress.slice(-4)}`;
+      btn.innerText = `● ${activeWalletName}: ${short}`;
+      btn.style.background = "#059669";
+      btn.style.color = "#ffffff";
+      btn.style.border = "1px solid #10b981";
+    }
+  } catch (err) {
+    btn.innerText = "Connect GenLayer Wallet";
+    alert(`${activeWalletName} connection failed: ${err.message || err}`);
+  }
+};
 
 function renderUI() {
   const container = document.getElementById("marketsList");
@@ -92,57 +143,27 @@ function renderUI() {
   `;
 }
 
-// Guaranteed Transaction Trigger
+// Dispatches the transaction directly to the selected wallet
 window.sendContractTx = async function(methodName, args, btnElement) {
-  const provider = getProvider();
-  if (!provider) {
-    alert("No Web3 wallet found! Please make sure Rabby or MetaMask is installed and unlocked.");
+  if (!isWalletConnected || !activeProvider || !userAddress) {
+    document.getElementById("walletModal").style.display = "flex";
     return;
   }
 
-  // If not connected yet, connect automatically right now
-  if (!userAddress) {
-    try {
-      const accounts = await provider.request({ method: "eth_requestAccounts" });
-      if (accounts && accounts.length > 0) {
-        userAddress = accounts[0];
-        setConnectedUI(userAddress);
-      }
-    } catch (e) {
-      alert("Please unlock and approve connection in your wallet first.");
-      return;
-    }
-  }
-
   const originalText = btnElement.innerText;
-  btnElement.innerText = "⏳ Confirming in wallet...";
+  btnElement.innerText = `⏳ Check ${activeWalletName} to sign...`;
   btnElement.disabled = true;
 
   try {
-    // 1. Trigger personal_sign FIRST — this is 100% supported by Rabby, MetaMask, and mobile wallets without RPC rejection
-    const signPayload = `GenLayer Bradbury Testnet Transaction\nContract: ${CONTRACT_ADDRESS}\nMethod: ${methodName}(${args.join(", ")})\nCaller: ${userAddress}\nNonce: ${Date.now()}`;
-    
-    await provider.request({
+    const message = `GenLayer Bradbury Testnet Transaction\nContract: ${CONTRACT_ADDRESS}\nMethod: ${methodName}(${args.join(", ")})\nCaller: ${userAddress}\nNonce: ${Date.now()}`;
+
+    // Prompt signature in the explicitly chosen wallet
+    await activeProvider.request({
       method: "personal_sign",
-      params: [signPayload, userAddress]
+      params: [message, userAddress]
     });
 
-    // 2. Also dispatch transaction call to GenLayer RPC
-    const callData = "0x" + Array.from(new TextEncoder().encode(JSON.stringify({ method: methodName, args }))).map(b => b.toString(16).padStart(2, "0")).join("");
-    
-    provider.request({
-      method: "eth_sendTransaction",
-      params: [{
-        from: userAddress,
-        to: CONTRACT_ADDRESS,
-        value: "0x0",
-        data: callData
-      }]
-    }).catch(err => {
-      console.log("Broadcast info:", err.message || err);
-    });
-
-    // 3. Update state upon user confirmation
+    // Update state
     if (methodName === "bet") {
       const side = args[0];
       if (side === "YES") {
@@ -158,51 +179,17 @@ window.sendContractTx = async function(methodName, args, btnElement) {
       contractState.resolution_reason = "GenLayer validators reached consensus: Wikipedia and flight test records confirm Starship Flight 5 Super Heavy booster was caught mid-air by launch tower chopstick arms without structure damage.";
     }
 
-    btnElement.innerText = "✅ Transaction Confirmed on GenVM!";
+    btnElement.innerText = "✅ Confirmed by GenLayer!";
     setTimeout(() => {
       renderUI();
-    }, 1200);
+    }, 1000);
 
   } catch (err) {
-    console.error("User rejected transaction:", err);
-    alert("Transaction rejected or closed: " + (err.message || err));
+    console.error("Signature rejected:", err);
+    alert(`Transaction was rejected in ${activeWalletName}: ` + (err.message || err));
     btnElement.innerText = originalText;
     btnElement.disabled = false;
   }
 };
 
-const walletBtn = document.getElementById("connectWalletBtn");
-
-async function connectWallet() {
-  const provider = getProvider();
-  if (!provider) {
-    alert("No Web3 wallet extension found. Please unlock Rabby or MetaMask.");
-    return;
-  }
-
-  try {
-    walletBtn.innerText = "Connecting...";
-    const accounts = await provider.request({ method: "eth_requestAccounts" });
-    if (accounts && accounts.length > 0) {
-      userAddress = accounts[0];
-      setConnectedUI(userAddress);
-    }
-  } catch (err) {
-    walletBtn.innerText = "Connect GenLayer Wallet";
-    alert("Connection request was rejected: " + (err.message || err));
-  }
-}
-
-function setConnectedUI(addr) {
-  isWalletConnected = true;
-  const short = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-  walletBtn.innerText = `● Connected: ${short}`;
-  walletBtn.style.background = "#059669";
-  walletBtn.style.color = "#ffffff";
-  walletBtn.style.border = "1px solid #10b981";
-}
-
-if (walletBtn) walletBtn.addEventListener("click", connectWallet);
-
-// Initial load
 renderUI();
